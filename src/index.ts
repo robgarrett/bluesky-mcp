@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.ts';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { readFile } from "node:fs/promises";
 import { BlueskyClient } from './blueskyClient.js';
 
 const client = new BlueskyClient();
+const MAX_IMAGE_BYTES = 2_000_000;
 
 const server = new McpServer({
   name: "bluesky-mcp",
@@ -41,9 +43,14 @@ export const CreatePostSchema = z.object({
   images: z
     .array(
       z.object({
-        data: z.string().describe("Base64 encoded image data"),
-        encoding: z.string().describe("Image MIME type (e.g., image/jpeg)"),
+        data: z.string().optional().describe("Base64 encoded image data"),
+        encoding: z.string().optional().describe("Image MIME type (e.g., image/jpeg)"),
+        url: z.string().url().refine((value) => value.startsWith('https://'), "Image URL must use HTTPS").optional().describe("Public HTTPS image URL; downloaded by the MCP server"),
+        path: z.string().optional().describe("Local image path readable by the MCP server"),
+        alt: z.string().max(1000).optional().describe("Accessible alt text"),
       })
+        .refine((image) => Number(Boolean(image.data)) + Number(Boolean(image.url)) + Number(Boolean(image.path)) === 1,
+          "Provide exactly one of data, url, or path")
     )
     .optional(),
 });
@@ -53,6 +60,33 @@ export const GetTimelineSchema = z.object({
 });
 
 export type CreatePostArgs = z.infer<typeof CreatePostSchema>;
+
+async function resolveImages(images: CreatePostArgs['images']): Promise<{ data: Buffer; encoding: string; alt?: string }[] | undefined> {
+  if (!images?.length) return undefined;
+  const resolved = [] as { data: Buffer; encoding: string; alt?: string }[];
+  for (const image of images) {
+    let data: Buffer;
+    let encoding = image.encoding;
+    if (image.data) {
+      data = Buffer.from(image.data, 'base64');
+    } else if (image.path) {
+      data = await readFile(image.path);
+    } else if (image.url) {
+      const response = await fetch(image.url, { signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Image download failed: ${response.status} ${response.statusText}`);
+      const contentType = response.headers.get('content-type')?.split(';', 1)[0];
+      if (!contentType?.startsWith('image/')) throw new Error(`URL did not return an image: ${contentType || 'unknown content type'}`);
+      encoding ||= contentType;
+      data = Buffer.from(await response.arrayBuffer());
+    } else {
+      throw new Error('Image must provide data, url, or path');
+    }
+    if (!encoding?.startsWith('image/')) throw new Error(`Image MIME type is required and must start with image/: ${encoding || 'missing'}`);
+    if (data.length > MAX_IMAGE_BYTES) throw new Error(`Image exceeds Bluesky's ${MAX_IMAGE_BYTES}-byte limit: ${data.length} bytes`);
+    resolved.push({ data, encoding, alt: image.alt });
+  }
+  return resolved;
+}
 export type GetTimelineArgs = z.infer<typeof GetTimelineSchema>;
 export interface BlueskyPost {
   uri: string;
@@ -160,21 +194,23 @@ server.tool(
   {
     text: z.string().describe("The text content of your post"),
     images: z
-      .array(
-        z.object({
-          data: z.string().describe("Base64 encoded image data"),
-          encoding: z.string().describe("Image MIME type (e.g., image/jpeg)"),
-        })
+    .array(
+    z.object({
+      data: z.string().optional().describe("Base64 encoded image data"),
+      encoding: z.string().optional().describe("Image MIME type (e.g., image/jpeg)"),
+      url: z.string().url().refine((value) => value.startsWith('https://'), "Image URL must use HTTPS").optional().describe("Public HTTPS image URL; downloaded by the MCP server"),
+      path: z.string().optional().describe("Local image path readable by the MCP server"),
+      alt: z.string().max(1000).optional().describe("Accessible alt text"),
+    })
+      .refine((image) => Number(Boolean(image.data)) + Number(Boolean(image.url)) + Number(Boolean(image.path)) === 1,
+        "Provide exactly one of data, url, or path")
       )
       .optional()
       .describe("Optional array of images to attach to the post"),
   },
   async ({ text, images }) => {
     try {
-      const processedImages = images?.map(img => ({
-        data: Buffer.from(img.data, 'base64'),
-        encoding: img.encoding,
-      }));
+      const processedImages = await resolveImages(images);
 
       const result = await client.createPost(text, processedImages);
       return {

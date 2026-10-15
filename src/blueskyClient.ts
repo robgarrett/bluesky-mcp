@@ -31,7 +31,7 @@ export class BlueskyClient {
     }
   }
 
-  async createPost(text: string, images?: { data: Buffer; encoding: string; }[]): Promise<{ uri: string; cid: string }> {
+  async createPost(text: string, images?: { data: Buffer; encoding: string; alt?: string; }[]): Promise<{ uri: string; cid: string }> {
     if (!this.isAuthenticated) {
       throw new Error('Not authenticated. Please login first.');
     }
@@ -60,8 +60,8 @@ export class BlueskyClient {
         if (uploadedImages.length > 0) {
           postRecord.embed = {
             $type: 'app.bsky.embed.images',
-            images: uploadedImages.map((blob) => ({
-              alt: 'Image',
+            images: uploadedImages.map((blob, index) => ({
+              alt: images?.[index]?.alt || 'Image',
               image: blob,
             })),
           };
