@@ -6,6 +6,7 @@
     "type": "module",
     "scripts": {
         "build": "tsc",
+        "test": "npm run build && node --test test/*.test.js",
         "prepare": "npm run build",
         "start": "node dist/index.js",
         "dev": "ts-node src/index.ts",
